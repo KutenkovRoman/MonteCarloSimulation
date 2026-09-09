@@ -60,7 +60,7 @@ def days_until(month: int, day: int, period_boundary: tuple[str, int]):
 @dataclass
 class SimulationConfig:
     simulation_period: int
-    periods_in_day: int
+    periods_in_day: int  # default 3 -> 8h periods
 
     # Initialization
     start_month: int | str
@@ -93,7 +93,7 @@ class SimulationConfig:
     disable_underloaded_S2I: bool = True  # from S to A or B
     disable_underloaded_I2S: bool = True  # from A or B to S
     disable_underloaded_S2D: bool = True  # from S to D
-    disable_underloaded_D2S: bool = True  # from S to D
+    disable_underloaded_D2S: bool = True  # from D to S
     disable_underloaded_I2D: bool = True  # from A or P to D
     disable_underloaded_D2I: bool = True  # from D to A or P
 
@@ -104,7 +104,7 @@ class SimulationConfig:
     underload_share_I2D: float = 0.0
     underload_share_D2I: float = 0.0
 
-    triangulation_time: int = 114
+    triangulation_time: int = 114   # 114 x 8h periods -> 38 days
     triangulation_n_sims: int = 0
     triangulation_fail_tol: float = 0.0 
 
@@ -112,18 +112,18 @@ class SimulationConfig:
     n_surge_feeders_A: int = 0
     n_surge_feeders_B: int = 0
 
-    # Base wait times (days before the FIRST vessel of that type departs)
+    # Base wait times (periods before the FIRST vessel of that type departs)
     base_wait_feeder_A: int = 0
     base_wait_feeder_B: int = 0
-    base_wait_mainland_A: int = 54
-    base_wait_mainland_B: int = 90
+    base_wait_mainland_A: int = 54  # 54 x 8h periods -> 18 days (fitted)
+    base_wait_mainland_B: int = 72  # 72 x 8h periods -> 24 days (fitted)
 
     # Round trip times (used to calculate staggering intervals)
-    rt_feeder_A: int = 34
-    rt_feeder_B: int = 42
-    rt_feeder_C: int = 148
-    rt_mainland_A: int = 245
-    rt_mainland_B: int = 237
+    rt_feeder_A: int = 34     # int(2 * 17.467)
+    rt_feeder_B: int = 42     # int(2 * (17.467 + 3.8))
+    rt_feeder_C: int = 200    # ~35 days, decided to use smaller time estimate
+    rt_mainland_A: int = 262  # int(2 * (3 * 43.72))
+    rt_mainland_B: int = 271  # int(2 * (3 * 43.72 + 4.464))
 
 
 class SimulationEnvironment:
@@ -349,18 +349,19 @@ class SimulationEnvironment:
             return 1  # run failed
 
         # =================================================================== #
-        # return previously rented containers whose delay has elapsed
-        still_pending = []
-        for remaining_time, route_id, n in self.delayed_returns:
-            if remaining_time == 1:
-                if route_id == 'A':
-                    self.n_unloaded_at_A += n
+        if self.delayed_returns:
+            # return previously rented containers whose delay has elapsed
+            still_pending = []
+            for remaining_time, route_id, n in self.delayed_returns:
+                if remaining_time == 1:
+                    if route_id == 'A':
+                        self.n_unloaded_at_A += n
+                    else:
+                        self.n_unloaded_at_P += n
                 else:
-                    self.n_unloaded_at_P += n
-            else:
-                still_pending.append((remaining_time - 1, route_id, n))
+                    still_pending.append((remaining_time - 1, route_id, n))
 
-        self.delayed_returns = still_pending
+            self.delayed_returns = still_pending
 
         if pre_states:
             # check if mainland vessel departed destination this period
@@ -536,14 +537,15 @@ class SimulationEnvironment:
             n_delivered += sum(self.dest_transport_handler.schedule_B)
             n_delivered += sum(self.dest_transport_handler.schedule_C)
 
-            output_handle.write(
-                f"*** Final stats ***\n"
-                f"Delivered to destination: {n_delivered}\n"
-                f"Minimum number of available containers: "
-                f"{self.min_unloaded_at_src} ({self.min_unloaded_timestamp})\n"
-            )
-            if self.triangulation_enabled:
-                output_handle.write(f"{self.n_triangulated}")
+            if output_handle is not None:
+                output_handle.write(
+                    f"*** Final stats ***\n"
+                    f"Delivered to destination: {n_delivered}\n"
+                    f"Minimum number of available containers: "
+                    f"{self.min_unloaded_at_src} ({self.min_unloaded_timestamp})"
+                )
+                if self.triangulation_enabled:
+                    output_handle.write(f"\nTriangulated: {self.n_triangulated}")
 
         return ret_code
 
@@ -591,6 +593,8 @@ class FeederVessel_Main:
         self.max_capacity = max_capacity  # in TEU's
 
         self.transition_time = wait_time
+
+        self.shipping_time = 0  # for visualization
         self.anchor_load_rate = 0
 
         self.n_loaded = 0  # how many containers are currently loaded on the ship
@@ -623,7 +627,8 @@ class FeederVessel_Main:
         if self.state == VesselState.LOADING_AT_SRC:
             if env.days_until_interflood_start == 1:
                 # depart as is, should return by the time interflood ends
-                self.transition_time = self.get_shipping_time(env, self.id, self.state)
+                self.shipping_time = self.get_shipping_time(env, self.id, self.state)
+                self.transition_time = self.shipping_time
                 self.state = VesselState.SHIPPING_FROM_SRC_TO_INTERM
                 return  # do not fall through
 
@@ -666,7 +671,8 @@ class FeederVessel_Main:
                 )
             ):
                 # depart after loading to sufficient capacity
-                self.transition_time = self.get_shipping_time(env, self.id, self.state)
+                self.shipping_time = self.get_shipping_time(env, self.id, self.state)
+                self.transition_time = self.shipping_time
                 self.state = VesselState.SHIPPING_FROM_SRC_TO_INTERM
 
         elif self.state == VesselState.LOADING_AT_INTERM:
@@ -744,6 +750,7 @@ class FeederVessel_Main:
                     self.state = VesselState.WAITING_AT_INTERM
                 else:
                     # depart after loading to sufficient capacity
+                    self.shipping_time = shipping_time
                     self.transition_time = shipping_time
                     self.state = VesselState.SHIPPING_FROM_INTERM_TO_SRC
 
@@ -891,6 +898,8 @@ class FeederVessel_Alt:
         self.max_capacity = max_capacity  # in TEU's
 
         self.transition_time = wait_time
+
+        self.shipping_time = 0  # for visualization
         self.anchor_load_rate = 0
 
         self.n_loaded = 0  # how many containers are currently loaded on the ship
@@ -981,6 +990,7 @@ class FeederVessel_Alt:
                     shipping_time_days < env.days_until_alt_route_end
                 ):
                     # depart after loading to sufficient capacity
+                    self.shipping_time = shipping_time
                     self.transition_time = shipping_time
                     self.state = VesselState.SHIPPING_FROM_SRC_TO_DEST
                 else:
@@ -990,6 +1000,17 @@ class FeederVessel_Alt:
                         days_until(1, 1, env.cfg.alt_route_start)
                     ) * periods_in_day
                     self.state = VesselState.WAITING_AT_SRC
+
+                    # additionally unload and redistribute loaded container to routes A and B;
+                    # do it instantly as in the real world somebody would have been smarter
+                    # about it and this is just a workaround to prevent containers from waiting
+                    # loaded at the vessel until alternative route is available again
+                    n_loaded_A = round(env.cfg.main_share_A * self.n_loaded)
+                    n_loaded_B = self.n_loaded - n_loaded_A
+
+                    env.src_transport_handler.schedule_A[0] += n_loaded_A
+                    env.src_transport_handler.schedule_B[0] += n_loaded_B
+                    self.n_loaded = 0
 
         elif self.state == VesselState.LOADING_AT_DEST:
             n_unloaded_at_dest = env.n_unloaded_at_dest_port
@@ -1032,11 +1053,13 @@ class FeederVessel_Alt:
                     shipping_time_days < env.days_until_alt_route_end
                 ):
                     # return via alternative route
+                    self.shipping_time = shipping_time
                     self.transition_time = shipping_time
                     self.state = VesselState.SHIPPING_FROM_DEST_TO_SRC
                 else:
                     # return via main route
-                    self.transition_time = self.get_shipping_time_backup(env, self.id, self.state)
+                    self.shipping_time = self.get_shipping_time_backup(env, self.id, self.state)
+                    self.transition_time = self.shipping_time
                     self.state = VesselState.SHIPPING_FROM_DEST_TO_INTERM
 
         elif self.state == VesselState.UNLOADING_AT_SRC:
@@ -1149,7 +1172,8 @@ class FeederVessel_Alt:
 
         elif self.state == VesselState.WAITING_AT_INTERM:
             # depart without any loading as it is not part of the ship routine
-            self.transition_time = self.get_shipping_time_backup(env, self.id, self.state)
+            self.shipping_time = self.get_shipping_time_backup(env, self.id, self.state)
+            self.transition_time = self.shipping_time
             self.state = VesselState.SHIPPING_FROM_INTERM_TO_SRC
 
         elif self.state == VesselState.SHIPPING_FROM_INTERM_TO_SRC:
@@ -1177,7 +1201,7 @@ class FeederVessel_Alt:
             elif self.state == VesselState.WAITING_AT_DEST:
                 point = 'D'
             else:
-                point = 'B'
+                point = 'A'
 
             return f"waiting at {point}: t = {self.transition_time}"
         elif (
@@ -1201,7 +1225,7 @@ class FeederVessel_Alt:
             elif self.state == VesselState.UNLOADING_AT_DEST:
                 point = 'D'
             else:
-                point = 'B'
+                point = 'A'
 
             return (
                 f"unloading at {point}: v_anchor = {self.anchor_load_rate}, "
@@ -1218,7 +1242,7 @@ class FeederVessel_Alt:
             else:
                 departure_point = 'D'
                 arrival_point = (
-                    'S' if self.state == VesselState.SHIPPING_FROM_DEST_TO_SRC else 'B'
+                    'S' if self.state == VesselState.SHIPPING_FROM_DEST_TO_SRC else 'A'
                 )
 
             return (
@@ -1251,6 +1275,8 @@ class MainlandVessel:
         self.max_capacity = max_capacity  # in TEU's
 
         self.transition_time = wait_time
+
+        self.shipping_time = 0  # for visualization
         self.anchor_load_rate = 0
 
         self.n_loaded = 0  # how many containers are currently loaded on the ship
@@ -1312,7 +1338,8 @@ class MainlandVessel:
                 )
             ):
                 # depart after loading to sufficient capacity
-                self.transition_time = self.get_shipping_time(env, self.id, self.state)
+                self.shipping_time = self.get_shipping_time(env, self.id, self.state)
+                self.transition_time = self.shipping_time
                 self.state = VesselState.SHIPPING_FROM_INTERM_TO_DEST
 
         elif self.state == VesselState.LOADING_AT_DEST:
@@ -1348,7 +1375,8 @@ class MainlandVessel:
                 )
             ):
                 # depart after loading to sufficient capacity
-                self.transition_time = self.get_shipping_time(env, self.id, self.state)
+                self.shipping_time = self.get_shipping_time(env, self.id, self.state)
+                self.transition_time = self.shipping_time
                 self.state = VesselState.SHIPPING_FROM_DEST_TO_INTERM
 
         elif self.state == VesselState.UNLOADING_AT_INTERM:
@@ -1554,6 +1582,9 @@ class SrcTransportHandler:
             self.schedule_unloaded[transportation_time] += env.n_unloaded_at_src_port
             env.n_unloaded_at_src_port = 0
 
+        # NOTE: technically it transports loaded containers to the port even during interflood;
+        # can be reworked, but for now left as a simplification as in the real world this would
+        # be handled properly and the operation would be resumed as soon as possible
         env.n_loaded_at_src_port_A += self.schedule_A[0]
         env.n_loaded_at_src_port_B += self.schedule_B[0]
         env.n_loaded_at_src_port_C += self.schedule_C[0]
@@ -1696,6 +1727,8 @@ def get_feeder_wait_time(
     env: SimulationEnvironment, vessel_id: str, state: VesselState
 ):
     # no reference; just some values
+    # if we are given a schedule, we could avoid it altogether and simply setup the fleet
+    # accroding to when vessels arrive to the port and are scheduled to depart
     return env.rng.choice([1, 2], p=[0.75, 0.25])
 
 def get_feeder_shipping_time(
@@ -1718,20 +1751,25 @@ def get_feeder_shipping_time(
         shipping_time = max(13, int(round(periods)))
 
         if route_id == 'B':
-            # no reference; just some values
+            # motivated by estimate of distance between points A and B
             shipping_time += env.rng.choice([3, 4], p=[0.2, 0.8])
 
         return shipping_time
 
     else:  # route_id == 'C'
         if not hasattr(get_feeder_shipping_time, "probs"):
-            # no reference; just some values
-            min_time = 68
-            max_time = 84
-            mean_time = 74
+            # could not find any data for this route to fit;
+            # the given time is 35 days, which is much more then initial estimate,
+            # decided to use ~33.3 days as mean
+            min_time = 92
+            max_time = 110
+            mean_time = 100
+
+            # the variance is chosen according to "x3 sigma" rule
+            scale = 4.0
 
             values = np.arange(min_time, max_time + 1)
-            probs = stat.norm.pdf(values, loc=mean_time, scale=1.0)
+            probs = stat.norm.pdf(values, loc=mean_time, scale=scale)
 
             get_feeder_shipping_time.values = values
             get_feeder_shipping_time.probs = (
@@ -1748,13 +1786,17 @@ def get_feeder_shipping_time_backup(
 ):
     if state == VesselState.LOADING_AT_DEST:
         if not hasattr(get_feeder_shipping_time_backup, "probs"):
-            # no reference; just some values
+            # unsure if we could use data from mainland vessels for a feeder, for now left
+            # as estimate of distance divided by speed + arbitrary bounds
             min_time = 125
             max_time = 148
             mean_time = 135
 
+            # the variance is chosen according to "x3 sigma" rule
+            scale = 5.0
+
             values = np.arange(min_time, max_time + 1)
-            probs = stat.norm.pdf(values, loc=mean_time, scale=1.0)
+            probs = stat.norm.pdf(values, loc=mean_time, scale=scale)
 
             get_feeder_shipping_time_backup.values = values
             get_feeder_shipping_time_backup.probs = (
@@ -1838,7 +1880,8 @@ def get_feeder_load_rate(
         if not hasattr(get_feeder_load_rate, "src_winter_probs"):
             hours_in_period = 24 // env.cfg.periods_in_day
 
-            # no reference, just some values
+            # during winter load rate per hour is 6-8 containers, decided to adapt it
+            # to an 8 hour periods by choosing arbitrary rate per hour probabilities
             width = 3  # [6, 7, 8]
             one_hour_probs = [0.25, 0.5, 0.25]
 
@@ -1858,8 +1901,7 @@ def get_feeder_load_rate(
             )
             get_feeder_load_rate.src_winter_probs = copy(probs)
 
-            # =============================================================== #
-
+            # same with summer, but load rate per hour is 8-12 containers
             width = 5  # [8, 9, 10, 11, 12]
             one_hour_probs = [0.15, 0.2, 0.3, 0.2, 0.15]
 
@@ -1905,6 +1947,7 @@ def get_feeder_load_rate(
 
             for vessel in env.feeder_vessels:
                 if (
+                    # check that routes match because there are 2 intermidiate points: A and B
                     vessel.id[-1] == route_id and
                     vessel.state == VesselState.LOADING_AT_INTERM and
                     vessel.anchor_load_rate > 0
@@ -1925,13 +1968,16 @@ def get_feeder_load_rate(
                 return 0
 
         if not hasattr(get_feeder_load_rate, "interm_probs"):
-            # no reference; just some values
+            # the given load rate is 80 container per 12-hour work shift for a loading crane;
+            # found info (unreliable) that feeder vessel can be loaded by 2 cranes
             min_rate = 103
             max_rate = 110
             mean_rate = 106.67
 
+            scale = 2.0
+
             values = np.arange(min_rate, max_rate + 1)
-            probs = stat.norm.pdf(values, loc=mean_rate, scale=1.0)
+            probs = stat.norm.pdf(values, loc=mean_rate, scale=scale)
 
             get_feeder_load_rate.interm_vals = values
             get_feeder_load_rate.interm_probs = (probs / probs.sum()).tolist()
@@ -1996,20 +2042,22 @@ def get_feeder_load_rate(
                 return 0
 
         # NOTE: using the same values as in loading/unloaing at intermidiate point
-        if not hasattr(get_feeder_load_rate, "interm_probs"):
-            # no reference; just some values
+        if not hasattr(get_feeder_load_rate, "dest_probs"):
+            # same as above
             min_rate = 103
-            max_rate = 109
+            max_rate = 110
             mean_rate = 106.67
 
-            values = np.arange(min_rate, max_rate + 1)
-            probs = stat.norm.pdf(values, loc=mean_rate, scale=1.0)
+            scale = 2.0
 
-            get_feeder_load_rate.interm_vals = values
-            get_feeder_load_rate.interm_probs = (probs / probs.sum()).tolist()
+            values = np.arange(min_rate, max_rate + 1)
+            probs = stat.norm.pdf(values, loc=mean_rate, scale=scale)
+
+            get_feeder_load_rate.dest_vals = values
+            get_feeder_load_rate.dest_probs = (probs / probs.sum()).tolist()
 
         return env.rng.choice(
-            get_feeder_load_rate.interm_vals, p=get_feeder_load_rate.interm_probs
+            get_feeder_load_rate.dest_vals, p=get_feeder_load_rate.dest_probs
         )
 
     else:
@@ -2017,43 +2065,27 @@ def get_feeder_load_rate(
 
 
 def get_mainland_wait_time(env: SimulationEnvironment, vessel_id: str, state: VesselState):
-    # no reference; just some values
+    # no reference; just some values based on destination port arrival/departure data
     return env.rng.choice([1, 2], p=[0.7, 0.3])
 
 def get_mainland_shipping_time(env: SimulationEnvironment, vessel_id: str, state: VesselState):
-    if not hasattr(get_mainland_load_rate, "probs_A"):
-        # no reference; just some values
-        min_time = 116
-        max_time = 136
-        mean_time = 122.67
-
-        values = np.arange(min_time, max_time + 1)
-        probs = stat.norm.pdf(values, loc=mean_time, scale=1.0)
-
-        get_mainland_load_rate.vals_A = values
-        get_mainland_load_rate.probs_A = (probs / probs.sum()).tolist()
-
-        # =================================================================== #
-        min_time = 112
-        max_time = 132
-        mean_time = 118.67
-
-        values = np.arange(min_time, max_time + 1)
-        probs = stat.norm.pdf(values, loc=mean_time, scale=1.0)
-
-        get_mainland_load_rate.vals_B = values
-        get_mainland_load_rate.probs_B = (probs / probs.sum()).tolist()
-
     route_id = vessel_id[-1]
 
-    if route_id == 'A':
-        values = get_mainland_load_rate.vals_A
-        probs = get_mainland_load_rate.probs_A
-    else:
-        values = get_mainland_load_rate.vals_B
-        probs = get_mainland_load_rate.probs_B
+    shape = 0.1004141009142946
+    scale = 43.722165087845774
 
-    return env.rng.choice(values, p=probs)
+    periods = 3 * stat.lognorm.rvs(
+        shape, loc=0.0, scale=scale, random_state=env.rng
+    )
+
+    # NOTE: 104 x 8h periods is the estimate for a physical lower bound
+    shipping_time = max(104, int(round(periods)))
+
+    if route_id == 'B':
+        # motivated by estimate of distance between points A and P
+        shipping_time += env.rng.choice([4, 5], p=[0.536, 0.464])
+
+    return shipping_time
 
 def get_mainland_load_rate(
     env: SimulationEnvironment, vessel_id: str, state: VesselState
@@ -2087,6 +2119,7 @@ def get_mainland_load_rate(
 
         for vessel in env.mainland_vessels:
             if (
+                # check that routes match because there are 2 intermidiate points: A and P
                 vessel.id[-1] == route_id and
                 vessel.state == VesselState.LOADING_AT_INTERM and
                 vessel.anchor_load_rate > 0
@@ -2139,7 +2172,6 @@ def get_mainland_load_rate(
 
         for vessel in env.mainland_vessels:
             if (
-                vessel.id[-1] == route_id and
                 vessel.state == VesselState.LOADING_AT_DEST and
                 vessel.anchor_load_rate > 0
             ):
@@ -2158,35 +2190,41 @@ def get_mainland_load_rate(
         if n_avail < n_to_load:
             return 0
 
-    if not hasattr(get_mainland_load_rate, "interm_probs"):
-        # no reference; just some values
+    if not hasattr(get_mainland_load_rate, "probs"):
+        # same info as for feeder vessels, but my estimate is that mainland vessel
+        # can be loaded by at least 3 cranes (need to look into it more)
         min_rate = 155
         max_rate = 165
         mean_rate = 160
 
-        values = np.arange(min_rate, max_rate + 1)
-        probs = stat.norm.pdf(values, loc=mean_rate, scale=1.0)
+        scale = 2.0
 
-        get_mainland_load_rate.interm_vals = values
-        get_mainland_load_rate.interm_probs = (probs / probs.sum()).tolist()
+        values = np.arange(min_rate, max_rate + 1)
+        probs = stat.norm.pdf(values, loc=mean_rate, scale=scale)
+
+        get_mainland_load_rate.vals = values
+        get_mainland_load_rate.probs = (probs / probs.sum()).tolist()
 
     return env.rng.choice(
-        get_mainland_load_rate.interm_vals, p=get_mainland_load_rate.interm_probs
+        get_mainland_load_rate.vals, p=get_mainland_load_rate.probs
     )
 
 
 def get_src_transportation_time(env: SimulationEnvironment, direct: bool):
+    # based on given info
     return env.cfg.periods_in_day
 
 def get_dest_transportation_time(env: SimulationEnvironment, direct: bool):
     if not hasattr(get_dest_transportation_time, "probs"):
-        # no reference; just some values
+        # based on given info that unloading takes from 10 to 14 days
         min_rate = 10 * env.cfg.periods_in_day
         max_rate = 14 * env.cfg.periods_in_day
         mean_rate = 12 * env.cfg.periods_in_day
 
+        scale = 3.0
+
         values = np.arange(min_rate, max_rate + 1)
-        probs = stat.norm.pdf(values, loc=mean_rate, scale=1.0)
+        probs = stat.norm.pdf(values, loc=mean_rate, scale=scale)
 
         get_dest_transportation_time.vals = values
         get_dest_transportation_time.probs = (probs / probs.sum()).tolist()
@@ -2196,16 +2234,18 @@ def get_dest_transportation_time(env: SimulationEnvironment, direct: bool):
             get_dest_transportation_time.vals, p=get_dest_transportation_time.probs
         )
     else:
+        # based on info that transportation to the depot takes ~5 days
         return 5 * env.cfg.periods_in_day
 
 def get_interm_transportation_time(env: SimulationEnvironment, direct: bool):
+    # based on info that transporation from B to P takes ~6 days
     return 6 * env.cfg.periods_in_day
 
 
 def setup_fleet(env: SimulationEnvironment):
     """Dynamically initializes vessels and staggers their departures."""
 
-    # Route A Feeders
+    # route A feeder vessels
     if env.cfg.n_feeders_A > 0:
         stagger = env.cfg.rt_feeder_A // env.cfg.n_feeders_A
         for i in range(env.cfg.n_feeders_A):
@@ -2221,7 +2261,7 @@ def setup_fleet(env: SimulationEnvironment):
                 )
             )
 
-    # Route B Feeders
+    # route B feeder vessels
     if env.cfg.n_feeders_B > 0:
         stagger = env.cfg.rt_feeder_B // env.cfg.n_feeders_B
         for i in range(env.cfg.n_feeders_B):
@@ -2237,7 +2277,7 @@ def setup_fleet(env: SimulationEnvironment):
                 )
             )
 
-    # Route A Mainlands
+    # route A mainalnd vessels
     if env.cfg.n_mainlands_A > 0:
         stagger = env.cfg.rt_mainland_A // env.cfg.n_mainlands_A
         for i in range(env.cfg.n_mainlands_A):
@@ -2253,7 +2293,7 @@ def setup_fleet(env: SimulationEnvironment):
                 )
             )
 
-    # Route B Mainlands
+    # route B mainalnd vessels
     if env.cfg.n_mainlands_B > 0:
         stagger = env.cfg.rt_mainland_B // env.cfg.n_mainlands_B
         for i in range(env.cfg.n_mainlands_B):
@@ -2269,9 +2309,14 @@ def setup_fleet(env: SimulationEnvironment):
                 )
             )
 
-    # Interflood Recovery (Surge Feeders)
+    # interflood recovery (surge feeder vessels)
     periods_in_day = env.cfg.periods_in_day
     interflood_end_wait_time = env.days_until_interflood_end * periods_in_day
+    if interflood_end_wait_time < 0:
+        interflood_end_wait_time = (
+            env.days_until(('December', 31)) + 1 +
+            days_until(1, 1, env.cfg.interflood_end)
+        ) * periods_in_day
 
     if env.cfg.n_surge_feeders_A > 0:
         # stagger = env.cfg.rt_feeder_A // env.cfg.n_surge_feeders_A
@@ -2305,8 +2350,13 @@ def setup_fleet(env: SimulationEnvironment):
                 )
             )
 
-    # Route C Feeders
+    # route C feeder vessels
     alt_route_wait_time = env.days_until_alt_route_start * periods_in_day
+    if alt_route_wait_time < 0:
+        alt_route_wait_time = (
+            env.days_until(('December', 31)) + 1 +
+            days_until(1, 1, env.cfg.alt_route_start)
+        )
 
     if env.cfg.n_feeders_C > 0:
         stagger = env.cfg.rt_feeder_C // env.cfg.n_feeders_C
@@ -2324,7 +2374,7 @@ def setup_fleet(env: SimulationEnvironment):
                 )
             )
 
-    # Transportation handlers
+    # transportation handlers
     env.src_transport_handler = SrcTransportHandler(
         max_transportation_time=16, get_transportation_time=get_src_transportation_time
     )
@@ -2351,18 +2401,21 @@ def run_single_simulation(args):
     return {
         'seed': seed,
         'failed': ret_code != 0,
-        'failed_during_interflood': (
-            ret_code != 0 and
-            env.days_until_interflood_start <= 0 and
-            env.days_until_interflood_end > 0
-        ),
+        # 'failed_during_interflood': (
+        #     ret_code != 0 and
+        #     env.days_until_interflood_start <= 0 and
+        #     env.days_until_interflood_end > 0
+        # ),
+
         'min_containers': env.min_unloaded_at_src,
+
         'total_delivered': (
             n_delivered_A + n_delivered_B + n_delivered_C
         ),
         'delivered_A': n_delivered_A,
         'delivered_B': n_delivered_B,
         'delivered_C': n_delivered_C,
+
         'triangulated': env.n_triangulated,
     }
 
@@ -2399,31 +2452,30 @@ def evaluate_config(cfg: SimulationConfig, n_sims: int):
         'n_feeder_B': f'{cfg.n_feeders_B}+{cfg.n_surge_feeders_B}',
 
         'failure_rate': df['failed'].mean(),
-        'interflood_failure_rate': df['failed_during_interflood'].mean(),
+        # 'interflood_failure_rate': df['failed_during_interflood'].mean(),
 
         'avg_delivered': f"{df['total_delivered'].mean():.2f} +/- {df['total_delivered'].std():.2f}",
-        # 'avg_delivered*': df['total_delivered'][~df['failed']].mean(),
 
         # 5-th percentile represents the "worst case" inventory drop across 95% of scenarios
         # 'worst_case_95%*': np.percentile(df['min_containers'][~df['failed']], 5),
-        'n_estimated_95%': cfg.n_containers - np.percentile(df['min_containers'], 5),
         'n_estimated_98%': cfg.n_containers - np.percentile(df['min_containers'], 2),
+        'n_estimated_99%': cfg.n_containers - np.percentile(df['min_containers'], 1),
 
-        # 'S2I': cfg.underload_share_S2I, 'I2D': cfg.underload_share_I2D,
         'triangulated': f"{df['triangulated'].mean():.2f} +/- {df['triangulated'].std():.2f}"
     }
 
 
 if __name__ == '__main__':
     cfg = SimulationConfig(
-        simulation_period=2200,
+        # simulation_period=1275,
+        simulation_period=10_950,
         periods_in_day=3,
         start_month='February', start_day=2,
         interflood_start=('May', 10),
         interflood_end=('June', 30),
         alt_route_start=('July', 1),
         alt_route_end=('November', 10),
-        n_containers=27_500,
+        n_containers=31_300,
         n_loaded_A=600, n_loaded_B=600,
         main_monthly_prod_rate=([3000] * 12),
         alt_monthly_prod_rate=[0, 0, 0, 0, 0, 666, 666, 667, 667, 667, 667, 0],
@@ -2435,15 +2487,17 @@ if __name__ == '__main__':
         # if we disable it, then everything collapses after interflood ends...
         disable_underloaded_I2S=False,
 
-        underload_share_I2D=0.9,
-        underload_share_S2I=0.5,
-        underload_share_S2D=0.9,
+        underload_share_I2D=0.85,
+        underload_share_S2I=0.50,
+        underload_share_S2D=0.85,
 
         triangulation_n_sims=0,
     )
 
-    print(evaluate_config(cfg, n_sims=1000))
+    print(evaluate_config(cfg, n_sims=1_000))
     # ---- OR ---- #
+    # start_time = time.time()
+
     # env = SimulationEnvironment(cfg)
     # setup_fleet(env)
     # with open("Logs.txt", 'w') as f_out:
@@ -2454,3 +2508,7 @@ if __name__ == '__main__':
     #         verbose_end=None,
     #         print_final_stats=True,
     #     )
+
+    # end_time = time.time()
+    # execution_time = end_time - start_time
+    # print(f"Execution time: {execution_time:.2f} sec / {execution_time / 60:.2f} min")
