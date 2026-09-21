@@ -76,12 +76,17 @@ class SimulationConfig:
     main_monthly_prod_rate: list[int]
     alt_monthly_prod_rate: list[int]
 
+    replenishments: list[tuple[int, int]] | None
+
     # Fleet sizes
     n_feeders_A: int
     n_feeders_B: int
     n_feeders_C: int
     n_mainlands_A: int
     n_mainlands_B: int
+
+    resample_interflood_period: bool = False
+    resample_alt_route_period: bool = False
 
     main_share_A: float = 0.6
 
@@ -107,6 +112,7 @@ class SimulationConfig:
     triangulation_time: int = 114   # 114 x 8h periods -> 38 days
     triangulation_n_sims: int = 0
     triangulation_fail_tol: float = 0.0 
+    triangulation_count_down: int = 0  # in days
 
     # Surge capacity (vessels that only activate after interflood ends)
     n_surge_feeders_A: int = 0
@@ -234,11 +240,20 @@ class SimulationEnvironment:
 
         self.rng = None
 
-        self.delayed_returns = []  # entries: [periods_remaining, route_id, n]
-        self.n_triangulated = 0    # total containers rented out (stats only)
-        self.triangulation_enabled = (  # False in a nested copies
-            cfg.triangulation_n_sims > 0
+        # second stream, for the triangulation controller only; seeded next to self.rng by seed_rngs()
+        self.ctrl_rng = None
+
+        self.delayed_returns = (  # entries: [periods_remaining, route_id, n]
+            [
+                (cfg.periods_in_day * days_remaining, 'R', n_replenishment)
+                for (days_remaining, n_replenishment) in cfg.replenishments
+            ]
+            if cfg.replenishments is not None
+            else []
         )
+        self.n_triangulated = 0  # total containers rented out (stats only)
+        self.triangulation_enabled = cfg.triangulation_n_sims > 0  # False in a nested copies
+        self.triangulation_count_down = cfg.triangulation_count_down
 
     def get_timestamp(self):
         month_name = MONTH_NAMES[self.month]
@@ -249,12 +264,196 @@ class SimulationEnvironment:
             self.month, self.day, period_boundary
         )
 
+    def seed_rngs(self, seed):
+        """
+        Seed both random streams from one seed.
+
+        `rng` drives the physical system: voyage lengths, load rates, waiting.
+        `ctrl_rng` drives the triangulation controller and nothing else.
+
+        They used to be one stream. Because the controller draws a seed per
+        sub-simulation out of it, merely switching triangulation on shifted the
+        parent's own trajectory at the same seed, so "with rental" could not be
+        compared against "without rental" run for run. With two streams the
+        physical draws land in the same order whatever the controller does.
+
+        `rng` is built exactly as before, so every run recorded before this
+        patch still reproduces bit for bit. `ctrl_rng` is derived as a child of
+        the seed rather than spawned from it: SeedSequence.spawn() mutates the
+        object it is called on, and seeding twice from one SeedSequence would
+        then give two different runs.
+
+        Call this instead of assigning `env.rng` by hand when you drive
+        `simulate_period()` from outside, otherwise `ctrl_rng` stays None and
+        triangulation refuses to start.
+        """
+        self.rng = np.random.default_rng(seed)  # byte for byte as before
+
+        # default_rng() also takes a Generator or a BitGenerator, and both carry
+        # the SeedSequence they were built from, so accept everything it does
+        if isinstance(seed, np.random.SeedSequence):
+            base = seed
+        elif isinstance(seed, np.random.Generator):
+            base = seed.bit_generator.seed_seq
+        elif isinstance(seed, np.random.BitGenerator):
+            base = seed.seed_seq
+        else:
+            base = np.random.SeedSequence(seed)
+
+        # spawn_key (..., 1) is what base.spawn(2) would give as its second
+        # child, without touching base.n_children_spawned. Nothing in this file
+        # spawns off a seed that has already been handed to simulate(), so the
+        # key cannot collide with a sub-seed made elsewhere.
+        self.ctrl_rng = np.random.default_rng(
+            np.random.SeedSequence(
+                entropy=base.entropy,
+                spawn_key=tuple(base.spawn_key) + (1,),
+                pool_size=base.pool_size,
+            )
+        )
+
+    def snapshot(self):
+        """The whole state of one period as plain data.
+
+        Written for the visualization, which otherwise reads attributes by name
+        and silently draws a wrong picture the day one of them is renamed.
+
+        `stocks` accounts for every container in the system, so its values sum
+        to `cfg.n_containers` and that sum is reported as `total_containers`.
+        Two caveats, both real:
+
+        * in the period a run FAILS the sum is short by that day's production.
+          `SrcTransportHandler.handle` subtracts the daily draw from the
+          warehouse and returns before crediting the port out of its queues, so
+          the state is already torn when the failure is detected, and
+          `src_warehouse` is negative. Outside that period the sum is exact.
+        * `n_delivered_*` are cumulative flow counters, not stocks. They sit in
+          `delivered` and stay out of the balance, because a delivered
+          container comes back as an empty in China and would be counted twice.
+
+        `leg_progress` is how far along its current leg a vessel is, 0 at
+        departure and 1 on arrival. It is None unless the vessel is at sea:
+        `shipping_time` is 0 until a vessel's first voyage, and the waiting
+        branches overwrite `transition_time` without touching it, so the raw
+        ratio is meaningless in about a quarter of all vessel-periods.
+
+        The calendar is the model's own, and its month index starts at DECEMBER
+        (`MONTH_NAMES`), so `month_index` 5 is May, not June. There is no year
+        and no absolute period number here because the environment does not
+        keep one: count periods on the caller's side if you need to tell one
+        year from the next.
+
+        Every number is a plain int, so the result survives `json.dumps`.
+        """
+        if self.src_transport_handler is None:
+            raise ValueError("snapshot() needs the handlers: call setup_fleet(env) first")
+
+        src = self.src_transport_handler
+        dest = self.dest_transport_handler
+        interm = self.interm_transport_handler
+
+        on_feeders = {'A': 0, 'B': 0, 'C': 0}
+        for vessel in self.feeder_vessels:
+            on_feeders[vessel.id[-1]] += vessel.n_loaded
+
+        on_mainlands = {'A': 0, 'B': 0}
+        for vessel in self.mainland_vessels:
+            on_mainlands[vessel.id[-1]] += vessel.n_loaded
+
+        stocks = {
+            'src_warehouse': self.n_unloaded_at_src,
+            'src_port': (
+                self.n_unloaded_at_src_port +
+                self.n_loaded_at_src_port_A +
+                self.n_loaded_at_src_port_B +
+                self.n_loaded_at_src_port_C +
+                src.n_unloaded_at_src_port +
+                sum(src.schedule_A) + sum(src.schedule_B) +
+                sum(src.schedule_C) + sum(src.schedule_unloaded)
+            ),
+            'feeders_A': on_feeders['A'],
+            'feeders_B': on_feeders['B'],
+            'feeders_C': on_feeders['C'],
+            'mainlands_A': on_mainlands['A'],
+            'mainlands_B': on_mainlands['B'],
+            'A': (
+                self.n_unloaded_at_A + self.n_loaded_at_A +
+                interm.n_loaded_at_A + interm.n_unloaded_at_A
+            ),
+            'B': self.n_unloaded_at_B + self.n_loaded_at_B + interm.n_loaded_at_B,
+            'P': self.n_unloaded_at_P + self.n_loaded_at_P + interm.n_unloaded_at_P,
+            # both directions of the railway: loaded B -> P and empties P -> B
+            'rail_B_P': sum(interm.schedule_loaded) + sum(interm.schedule_unloaded),
+            'D': (
+                self.n_unloaded_at_dest + self.n_unloaded_at_dest_port +
+                self.n_loaded_at_dest_port_A +
+                self.n_loaded_at_dest_port_B +
+                self.n_loaded_at_dest_port_C +
+                dest.loaded_A + dest.loaded_B + dest.loaded_C +
+                sum(dest.schedule_A) + sum(dest.schedule_B) +
+                sum(dest.schedule_C) + sum(dest.schedule_unloaded)
+            ),
+            # out on rent: in neither a port nor a vessel
+            'rented_out': sum(n for _, _, n in self.delayed_returns),
+        }
+        stocks = {name: int(value) for name, value in stocks.items()}
+
+        vessels = []
+        for vessel in self.feeder_vessels + self.mainland_vessels:
+            at_sea = vessel.state.name.startswith('SHIPPING_FROM_')
+            progress = None
+            if at_sea and vessel.shipping_time > 0:
+                progress = 1.0 - vessel.transition_time / vessel.shipping_time
+            vessels.append({
+                'id': vessel.id,
+                'route': vessel.id[-1],
+                'state': vessel.state.name,
+                'n_loaded': int(vessel.n_loaded),
+                'max_capacity': int(vessel.max_capacity),
+                'transition_time': int(vessel.transition_time),
+                'shipping_time': int(vessel.shipping_time),
+                'leg_progress': progress,
+            })
+
+        return {
+            'month': MONTH_NAMES[self.month],
+            'month_index': int(self.month),  # 0 is December, see the docstring
+            'day': int(self.day),
+            'period_in_day': int(self.period),
+
+            'days_until_interflood_start': int(self.days_until_interflood_start),
+            'days_until_interflood_end': int(self.days_until_interflood_end),
+            'days_until_alt_route_start': int(self.days_until_alt_route_start),
+            'days_until_alt_route_end': int(self.days_until_alt_route_end),
+
+            'stocks': stocks,
+            'total_containers': sum(stocks.values()),
+
+            'vessels': vessels,
+
+            'delivered': {
+                'A': int(self.n_delivered_A),
+                'B': int(self.n_delivered_B),
+                'C': int(self.n_delivered_C),
+            },
+            'n_triangulated': int(self.n_triangulated),
+            # running minimum, updated at the START of a period, so it can be
+            # one period ahead of src_warehouse above
+            'min_unloaded_at_src': int(self.min_unloaded_at_src),
+        }
+
     def _max_safe_rented(self, vessel):
         """
         Binary-search max n_rented <= n_loaded such that diverting n_rented
         containers (returned only after shipping_time + triangulation_time)
         does not stop production in more than fail_tol share of sub-sims
         """
+        if self.ctrl_rng is None:
+            raise ValueError(
+                "triangulation needs ctrl_rng: call env.seed_rngs(seed) "
+                "instead of assigning env.rng directly"
+            )
+
         cfg = self.cfg
         shipping_time = vessel.transition_time
         buffer_time = 7 * self.cfg.periods_in_day
@@ -275,8 +474,11 @@ class SimulationEnvironment:
                         break
 
                 env_copy.delayed_returns.append((return_time, route_id, n_rented))
-                seed = int(self.rng.integers(0, 2**31 - 1))
-                if env_copy.simulate(seed) != 0:
+                # use self.ctrl_rng to avoid parent trajectory being dependent on whether
+                # triangulation is enabled or not
+                seed = int(self.ctrl_rng.integers(0, 2**31 - 1))
+                ret_code = env_copy.simulate(seed)
+                if ret_code != 0:
                     fails += 1
                     if fails > cfg.triangulation_fail_tol * cfg.triangulation_n_sims:
                         return False
@@ -306,11 +508,37 @@ class SimulationEnvironment:
             self.days_until_alt_route_start -= 1
             self.days_until_alt_route_end -= 1
 
+            if self.triangulation_count_down > 0:
+                self.triangulation_count_down -= 1
+
             if self.day > MONTH_DAYS[self.month]:
                 self.month = (self.month + 1) % 12
                 self.day = 1
 
                 if self.month == 1:  # started new year
+                    if self.cfg.resample_interflood_period:
+                        # TODO: add proper callback <-- hardcoded for now
+                        self.cfg.interflood_start = (
+                            "May", self.rng.choice(
+                                [10, 11, 12, 13, 14], p=[0.125, 0.25, 0.25, 0.25, 0.125]
+                            )
+                        )
+                        self.cfg.interflood_end = (
+                            "June", self.rng.choice(
+                                [16, 17, 18, 19, 20], p=[0.125, 0.25, 0.25, 0.25, 0.125]
+                            )
+                        )
+
+                    if self.cfg.resample_alt_route_period:
+                        self.cfg.alt_route_start = (
+                            "July", self.rng.choice([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+                        )
+                        self.cfg.alt_route_end = (
+                            "November", self.rng.choice(
+                                [15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25]
+                            )
+                        )
+
                     self.days_until_interflood_start = self.days_until(self.cfg.interflood_start)
                     self.days_until_interflood_end = self.days_until(self.cfg.interflood_end)
 
@@ -325,15 +553,14 @@ class SimulationEnvironment:
             self.min_unloaded_at_src = self.n_unloaded_at_src
             self.min_unloaded_timestamp = self.get_timestamp()
 
-        # =================================================================== #
         pre_states = {}
         if (
             self.triangulation_enabled and
+            self.triangulation_count_down == 0 and
             self.cfg.triangulation_n_sims > 0 and
             self.cfg.triangulation_time > 0
         ):
             pre_states = {ves.id: ves.state for ves in self.mainland_vessels}
-        # =================================================================== #
 
         for vessel in self.feeder_vessels:
             vessel.simulate(self)
@@ -345,10 +572,15 @@ class SimulationEnvironment:
         self.dest_transport_handler.handle(self)
         self.interm_transport_handler.handle(self)
 
-        if self.n_unloaded_at_src < 0:
+        n_avail = (
+            self.n_unloaded_at_src + self.n_unloaded_at_src_port + sum(self.src_transport_handler.schedule_unloaded)
+        )
+        n_required = 3450  # TODO: fix; hardcoded, based on resampling calculations
+        if self.n_unloaded_at_src < 0 or (
+            self.days_until_interflood_start == 0 and n_avail < n_required
+        ):
             return 1  # run failed
 
-        # =================================================================== #
         if self.delayed_returns:
             # return previously rented containers whose delay has elapsed
             still_pending = []
@@ -356,8 +588,17 @@ class SimulationEnvironment:
                 if remaining_time == 1:
                     if route_id == 'A':
                         self.n_unloaded_at_A += n
-                    else:
+                    elif route_id == 'B':
                         self.n_unloaded_at_P += n
+                    else:  # predetermined balancing
+                        # TODO: make this logic more explicit
+                        self.n_unloaded_at_src += n
+                        # ---- OR ---- #
+                        # if self.n_unloaded_at_src + n >= 0:
+                        #     self.n_unloaded_at_src += n
+                        # else:
+                        #     still_pending.append((1, route_id, self.n_unloaded_at_src + n))
+                        #     self.n_unloaded_at_src = 0
                 else:
                     still_pending.append((remaining_time - 1, route_id, n))
 
@@ -387,7 +628,6 @@ class SimulationEnvironment:
                                 n_rented,
                             )
                         )
-        # =================================================================== #
 
         if output_handle is not None:
             loaded_A = self.n_loaded_at_src_port_A
@@ -473,7 +713,7 @@ class SimulationEnvironment:
         verbose_end=None,
         print_final_stats=False,
     ):
-        self.rng = np.random.default_rng(seed)
+        self.seed_rngs(seed)
 
         if verbose_start is not None:
             start_month_name, start_day = verbose_start
@@ -2401,11 +2641,6 @@ def run_single_simulation(args):
     return {
         'seed': seed,
         'failed': ret_code != 0,
-        # 'failed_during_interflood': (
-        #     ret_code != 0 and
-        #     env.days_until_interflood_start <= 0 and
-        #     env.days_until_interflood_end > 0
-        # ),
 
         'min_containers': env.min_unloaded_at_src,
 
@@ -2452,37 +2687,46 @@ def evaluate_config(cfg: SimulationConfig, n_sims: int):
         'n_feeder_B': f'{cfg.n_feeders_B}+{cfg.n_surge_feeders_B}',
 
         'failure_rate': df['failed'].mean(),
-        # 'interflood_failure_rate': df['failed_during_interflood'].mean(),
 
         'avg_delivered': f"{df['total_delivered'].mean():.2f} +/- {df['total_delivered'].std():.2f}",
 
         # 5-th percentile represents the "worst case" inventory drop across 95% of scenarios
         # 'worst_case_95%*': np.percentile(df['min_containers'][~df['failed']], 5),
-        'n_estimated_98%': cfg.n_containers - np.percentile(df['min_containers'], 2),
-        'n_estimated_99%': cfg.n_containers - np.percentile(df['min_containers'], 1),
+        # 'n_estimated_98%': cfg.n_containers - np.percentile(df['min_containers'], 2),
+        # 'n_estimated_99%': cfg.n_containers - np.percentile(df['min_containers'], 1),
 
         'triangulated': f"{df['triangulated'].mean():.2f} +/- {df['triangulated'].std():.2f}"
     }
 
 
+from wakepy import keep
+
 if __name__ == '__main__':
     cfg = SimulationConfig(
-        # simulation_period=1275,
         simulation_period=10_950,
         periods_in_day=3,
-        start_month='February', start_day=2,
-        interflood_start=('May', 10),
-        interflood_end=('June', 30),
+
+        start_month='January', start_day=1,
+
+        interflood_start=('May', 11),
+        interflood_end=('June', 20),
+
         alt_route_start=('July', 1),
         alt_route_end=('November', 10),
-        n_containers=31_300,
+
+        n_containers=23_950,
         n_loaded_A=600, n_loaded_B=600,
+
         main_monthly_prod_rate=([3000] * 12),
         alt_monthly_prod_rate=[0, 0, 0, 0, 0, 666, 666, 667, 667, 667, 667, 0],
 
         n_feeders_A=3, n_feeders_B=2, n_feeders_C=4,
         n_mainlands_A=6, n_mainlands_B=4,
         n_surge_feeders_A=0, n_surge_feeders_B=0,
+
+        resample_interflood_period=True,
+        resample_alt_route_period=True,
+        replenishments=None,
 
         # if we disable it, then everything collapses after interflood ends...
         disable_underloaded_I2S=False,
@@ -2492,9 +2736,11 @@ if __name__ == '__main__':
         underload_share_S2D=0.85,
 
         triangulation_n_sims=0,
+        # triangulation_count_down=740,
     )
 
-    print(evaluate_config(cfg, n_sims=1_000))
+    with keep.running(on_fail='warn'):
+        print(evaluate_config(cfg, n_sims=10_000))
     # ---- OR ---- #
     # start_time = time.time()
 
