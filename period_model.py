@@ -456,9 +456,20 @@ class SimulationEnvironment:
 
         cfg = self.cfg
         shipping_time = vessel.transition_time
-        buffer_time = 7 * self.cfg.periods_in_day
         return_time = shipping_time + cfg.triangulation_time
-        horizon = return_time + buffer_time
+        # days_until_interflood = (
+        #     self.days_until_interflood_start
+        #     if self.days_until_interflood_start >= 0
+        #     else self.days_until(('December', 31)) + 1 + days_until(1, 1, self.cfg.interflood_start)
+        # )
+        # horizon = min(
+        #     180 * self.cfg.periods_in_day,
+        #     max(
+        #         return_time + 7 * self.cfg.periods_in_day,
+        #         days_until_interflood * self.cfg.periods_in_day
+        #     )
+        # ) + 1
+        horizon = 180 * self.cfg.periods_in_day
         route_id = vessel.id[-1]
 
         def feasible(n_rented):
@@ -593,7 +604,7 @@ class SimulationEnvironment:
                     else:  # predetermined balancing
                         # TODO: make this logic more explicit
                         self.n_unloaded_at_src += n
-                        # ---- OR ---- #
+                        # ----- OR -----
                         # if self.n_unloaded_at_src + n >= 0:
                         #     self.n_unloaded_at_src += n
                         # else:
@@ -885,13 +896,13 @@ class FeederVessel_Main:
             if self.anchor_load_rate == 0:
                 # sample base load rate
                 self.anchor_load_rate = self.get_load_rate(env, self.id, self.state)
-                factor = 1.0
+                load_rate = self.anchor_load_rate
             else:
                 # sample small deviation
                 factor = self.get_load_rate(env, self.id, self.state)
+                load_rate = round(self.anchor_load_rate * factor)
 
             if self.anchor_load_rate > 0:
-                load_rate = round(self.anchor_load_rate * factor)
                 n_load = min(
                     n_loaded_at_src, load_rate, self.max_capacity - self.n_loaded
                 )
@@ -929,10 +940,11 @@ class FeederVessel_Main:
             if self.anchor_load_rate == 0:
                 # sample base load rate
                 self.anchor_load_rate = self.get_load_rate(env, self.id, self.state)
-                factor = 1.0
+                load_rate = self.anchor_load_rate
             else:
                 # sample small deviation
                 factor = self.get_load_rate(env, self.id, self.state)
+                load_rate = round(self.anchor_load_rate * factor)
 
             if self.anchor_load_rate > 0:
                 load_rate = round(self.anchor_load_rate * factor)
@@ -1190,13 +1202,13 @@ class FeederVessel_Alt:
             if self.anchor_load_rate == 0:
                 # sample base load rate
                 self.anchor_load_rate = self.get_load_rate(env, self.id, self.state)
-                factor = 1.0
+                load_rate = self.anchor_load_rate
             else:
                 # sample small deviation
                 factor = self.get_load_rate(env, self.id, self.state)
+                load_rate = round(self.anchor_load_rate * factor)
 
             if self.anchor_load_rate > 0:
-                load_rate = round(self.anchor_load_rate * factor)
                 n_load = min(
                     n_loaded_at_src, load_rate, self.max_capacity - self.n_loaded
                 )
@@ -1263,13 +1275,13 @@ class FeederVessel_Alt:
             if self.anchor_load_rate == 0:
                 # sample base load rate
                 self.anchor_load_rate = self.get_load_rate(env, self.id, self.state)
-                factor = 1.0
+                load_rate = self.anchor_load_rate
             else:
                 # sample small deviation
                 factor = self.get_load_rate(env, self.id, self.state)
+                load_rate = round(self.anchor_load_rate * factor)
 
             if self.anchor_load_rate > 0:
-                load_rate = round(self.anchor_load_rate * factor)
                 n_load = min(
                     n_unloaded_at_dest, load_rate, self.max_capacity - self.n_loaded
                 )
@@ -1552,13 +1564,13 @@ class MainlandVessel:
             if self.anchor_load_rate == 0:
                 # sample base load rate
                 self.anchor_load_rate = self.get_load_rate(env, self.id, self.state)
-                factor = 1.0
+                load_rate = self.anchor_load_rate
             else:
                 # sample small deviation
                 factor = self.get_load_rate(env, self.id, self.state)
+                load_rate = round(self.anchor_load_rate * factor)
 
             if self.anchor_load_rate > 0:
-                load_rate = round(self.anchor_load_rate * factor)
                 n_load = min(
                     n_loaded_at_interm, load_rate, self.max_capacity - self.n_loaded
                 )
@@ -1593,13 +1605,13 @@ class MainlandVessel:
             if self.anchor_load_rate == 0:
                 # sample base load rate
                 self.anchor_load_rate = self.get_load_rate(env, self.id, self.state)
-                factor = 1.0
+                load_rate = self.anchor_load_rate
             else:
                 # sample small deviation
                 factor = self.get_load_rate(env, self.id, self.state)
+                load_rate = round(self.anchor_load_rate * factor)
 
             if self.anchor_load_rate > 0:
-                load_rate = round(self.anchor_load_rate * factor)
                 n_load = min(
                     n_unloaded_at_dest, load_rate, self.max_capacity - self.n_loaded
                 )
@@ -2702,8 +2714,10 @@ def evaluate_config(cfg: SimulationConfig, n_sims: int):
 from wakepy import keep
 
 if __name__ == '__main__':
-    cfg = SimulationConfig(
-        simulation_period=10_950,
+    cfg_1 = SimulationConfig(
+        # simulation_period=10950,
+        # simulation_period=5475,
+        simulation_period=7600,
         periods_in_day=3,
 
         start_month='January', start_day=1,
@@ -2714,7 +2728,7 @@ if __name__ == '__main__':
         alt_route_start=('July', 1),
         alt_route_end=('November', 10),
 
-        n_containers=23_950,
+        n_containers=29_150,
         n_loaded_A=600, n_loaded_B=600,
 
         main_monthly_prod_rate=([3000] * 12),
@@ -2726,7 +2740,8 @@ if __name__ == '__main__':
 
         resample_interflood_period=True,
         resample_alt_route_period=True,
-        replenishments=None,
+        # replenishments=[(494, 3_350), (859, 1_100), (1589, 400)],
+        replenishments=[(860, 2000)],
 
         # if we disable it, then everything collapses after interflood ends...
         disable_underloaded_I2S=False,
@@ -2735,12 +2750,88 @@ if __name__ == '__main__':
         underload_share_S2I=0.50,
         underload_share_S2D=0.85,
 
-        triangulation_n_sims=0,
-        # triangulation_count_down=740,
+        triangulation_n_sims=1,
+        triangulation_count_down=860,
+    )
+    cfg_2 = SimulationConfig(
+        simulation_period=7600,
+        periods_in_day=3,
+
+        start_month='January', start_day=1,
+
+        interflood_start=('May', 11),
+        interflood_end=('June', 20),
+
+        alt_route_start=('July', 1),
+        alt_route_end=('November', 10),
+
+        n_containers=29_150,
+        n_loaded_A=600, n_loaded_B=600,
+
+        main_monthly_prod_rate=([3000] * 12),
+        alt_monthly_prod_rate=[0, 0, 0, 0, 0, 666, 666, 667, 667, 667, 667, 0],
+
+        n_feeders_A=3, n_feeders_B=2, n_feeders_C=4,
+        n_mainlands_A=6, n_mainlands_B=4,
+        n_surge_feeders_A=0, n_surge_feeders_B=0,
+
+        resample_interflood_period=True,
+        resample_alt_route_period=True,
+        # replenishments=[(494, 3_350), (859, 1_100), (1589, 400)],
+        replenishments=[(900, 2000)],
+
+        # if we disable it, then everything collapses after interflood ends...
+        disable_underloaded_I2S=False,
+
+        underload_share_I2D=0.85,
+        underload_share_S2I=0.50,
+        underload_share_S2D=0.85,
+
+        triangulation_n_sims=1,
+        triangulation_count_down=900,
+    )
+    cfg_3 = SimulationConfig(
+        simulation_period=7600,
+        periods_in_day=3,
+
+        start_month='January', start_day=1,
+
+        interflood_start=('May', 11),
+        interflood_end=('June', 20),
+
+        alt_route_start=('July', 1),
+        alt_route_end=('November', 10),
+
+        n_containers=29_150,
+        n_loaded_A=600, n_loaded_B=600,
+
+        main_monthly_prod_rate=([3000] * 12),
+        alt_monthly_prod_rate=[0, 0, 0, 0, 0, 666, 666, 667, 667, 667, 667, 0],
+
+        n_feeders_A=3, n_feeders_B=2, n_feeders_C=4,
+        n_mainlands_A=6, n_mainlands_B=4,
+        n_surge_feeders_A=0, n_surge_feeders_B=0,
+
+        resample_interflood_period=True,
+        resample_alt_route_period=True,
+        # replenishments=[(494, 3_350), (859, 1_100), (1589, 400)],
+        replenishments=[(860, 1500)],
+
+        # if we disable it, then everything collapses after interflood ends...
+        disable_underloaded_I2S=False,
+
+        underload_share_I2D=0.85,
+        underload_share_S2I=0.50,
+        underload_share_S2D=0.85,
+
+        triangulation_n_sims=4,
+        triangulation_count_down=860,
     )
 
     with keep.running(on_fail='warn'):
-        print(evaluate_config(cfg, n_sims=10_000))
+        print(evaluate_config(cfg_1, n_sims=2_000))
+        print(evaluate_config(cfg_2, n_sims=2_000))
+        print(evaluate_config(cfg_3, n_sims=2_000))
     # ---- OR ---- #
     # start_time = time.time()
 
