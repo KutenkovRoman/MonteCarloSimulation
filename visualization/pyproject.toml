@@ -1,0 +1,28 @@
+[project]
+name = "simviz"
+version = "0.1.0"
+description = "Interface for the Dudinka container-fleet Monte Carlo simulation"
+requires-python = ">=3.11"
+dependencies = [
+    "dash>=2.17",
+    "plotly>=5.22",
+    "numpy>=1.26",
+    "pandas>=2.2",
+    "scipy>=1.13",
+    "tqdm>=4.66",          # imported at module level by period_model.py
+    # period_model.py imports it at module level, though it only uses it in __main__
+    "wakepy>=0.9",
+]
+
+[project.scripts]
+simviz = "simviz.app:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["simviz"]

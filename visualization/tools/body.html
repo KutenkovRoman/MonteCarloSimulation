@@ -1,0 +1,48 @@
+<div class="wrap">
+  <header>
+    <h1>Оборот парка контейнеров: два прогона</h1>
+    <p class="sub">Одна и та же конфигурация, парк <b>28 500</b> контейнеров, горизонт <b>2 года</b> со 2 февраля.
+       Различаются только seed. Модель Ромы, коммит <code>bf6ab02</code>, ни строки не изменено.</p>
+  </header>
+
+  <div class="bar">
+    <button id="play">▶</button>
+    <input id="scrub" type="range" min="0" value="0" step="1">
+    <span class="date" id="date">—</span>
+    <label class="spd">скорость
+      <select id="speed">
+        <option value="3">×1</option>
+        <option value="9" selected>×3</option>
+        <option value="21">×7</option>
+        <option value="45">×15</option>
+      </select>
+    </label>
+    <span class="season" id="season"></span>
+  </div>
+
+  <div class="cols">
+    <section class="col" data-run="0">
+      <h2><span class="dot ok"></span>Прогон A — производство не встало</h2>
+      <div class="map" id="map0"></div>
+      <div class="chart" id="chart0"></div>
+      <div class="stats" id="stats0"></div>
+    </section>
+    <section class="col" data-run="1">
+      <h2><span class="dot bad"></span>Прогон B — производство встало</h2>
+      <div class="map" id="map1"></div>
+      <div class="chart" id="chart1"></div>
+      <div class="stats" id="stats1"></div>
+    </section>
+  </div>
+
+  <footer>
+    <div class="legend">
+      <span><i style="background:#4c9be8"></i>маршрут A: Мурманск</span>
+      <span><i style="background:#6ac47e"></i>маршрут B: Архангельск и Петербург</span>
+      <span><i style="background:#e8a33d"></i>маршрут C: Севморпуть</span>
+      <span class="hint">размер точки — загрузка судна</span>
+    </div>
+    <p class="note">Морские трассы нарисованы вручную под длительности рейсов из модели: география в модели отсутствует.
+       Полоса склада серая в межпаводковую паузу (10 мая — 30 июня) и жёлтая в окно Севморпути (1 июля — 10 ноября).</p>
+  </footer>
+</div>

@@ -1,0 +1,108 @@
+/* Dash renames its component classes between majors, and a stylesheet that
+   still targets the old names fails silently: the rules simply match nothing
+   and Dash's own defaults win. That is what happened on the 4.x upgrade, and
+   the defaults are built for a light page, so the sidebar went dark-on-dark.
+   Everything below targets the 4.4 class names. If a control ever looks wrong
+   after an upgrade, check the class names in the DOM before anything else. */
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: #0f1720;
+  color: #dfe7ef;
+}
+
+/* ---- number inputs ---------------------------------------------------- */
+
+/* The text lives on .dash-input-element, not on the container we style from
+   Python, and Dash 4.4 paints it pure red by default. */
+.dash-input-element {
+  color: #dfe7ef !important;
+  background-color: transparent !important;
+  border: none !important;
+  font-size: 13px !important;
+}
+.dash-input-container {
+  background-color: #0d1620 !important;
+  border: 1px solid #22303f !important;
+}
+.dash-input-container:focus-within {
+  border-color: #4c9be8 !important;
+}
+
+/* The -/+ steppers ship as white buttons with near-black glyphs. */
+.dash-input-stepper {
+  background-color: #22303f !important;
+  color: #dfe7ef !important;
+  border: 1px solid #31465c !important;
+  border-radius: 5px !important;
+  opacity: 1 !important;
+}
+.dash-input-stepper:hover {
+  background-color: #2f4256 !important;
+  color: #ffffff !important;
+}
+.dash-input-stepper:disabled {
+  color: #55677a !important;
+  background-color: #182534 !important;
+}
+
+/* ---- sliders ---------------------------------------------------------- */
+
+/* Marks default to rgba(0, 21, 89, .6): invisible on this ground. */
+.dash-slider-mark {
+  color: #a8bccf !important;
+  font-size: 11px !important;
+}
+.dash-slider-mark-outside-selection {
+  color: #7d8fa3 !important;
+}
+.dash-slider-track {
+  background-color: #22303f !important;
+}
+.dash-slider-range {
+  background-color: #4c9be8 !important;
+}
+.dash-slider-thumb {
+  background-color: #4c9be8 !important;
+  border-color: #7fb8f0 !important;
+  opacity: 1 !important;
+}
+.dash-slider-tooltip {
+  background-color: #22303f !important;
+  color: #dfe7ef !important;
+}
+
+/* ---- dropdown --------------------------------------------------------- */
+
+.dash-dropdown,
+.dash-dropdown-trigger,
+.dash-dropdown-value,
+.dash-dropdown-value-item,
+.dash-dropdown-wrapper,
+.dash-dropdown-grid-container {
+  color: #dfe7ef !important;
+}
+.dash-dropdown-trigger,
+.dash-dropdown-grid-container {
+  background-color: #0d1620 !important;
+  border-color: #22303f !important;
+}
+.dash-dropdown-value-item:hover {
+  background-color: #22303f !important;
+}
+
+/* ---- scrollbar -------------------------------------------------------- */
+
+::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+::-webkit-scrollbar-track {
+  background: #0f1720;
+}
+::-webkit-scrollbar-thumb {
+  background: #2b3d4f;
+  border-radius: 5px;
+}
